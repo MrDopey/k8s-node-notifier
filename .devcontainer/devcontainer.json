@@ -4,6 +4,7 @@
 	"name": "k8s-node-notifier",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"image": "golang:1.23-bookworm",
+	"runArgs": ["--add-host", "host.docker.internal:host-gateway"],
 	"customizations": {
 		"vscode": {
 			"extensions": [
