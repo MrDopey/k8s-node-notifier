@@ -1,7 +1,7 @@
 apiVersion: mr.dopey/v1
-kind: nodenotifier
+kind: NodeNotifier
 metadata:
-  name: this-boy 
+  name: boxers
 spec:
-  label: abc
+  label: minikube.k8s.io/name=minikube
   slack-url: abc

@@ -35,7 +35,8 @@ var (
 )
 
 const (
-	oneHour        = int64(60 * 60 * 1000000)
+	// oneHour = int64(3 * 60 * 1e9) // 5mins for debugging
+	oneHour        = int64(60 * 60 * 1e9)
 	timerTolerance = int64(float64(oneHour) * 0.05)
 )
 
@@ -117,6 +118,7 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 			}
 		} else {
 			// Notify
+			log.Info(fmt.Sprintf("triggered! %s", nodeNotifier.Name))
 
 			maxDuration := time.Duration(0)
 			for _, n := range nodes.Items {
