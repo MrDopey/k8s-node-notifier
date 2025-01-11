@@ -63,7 +63,7 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// Since we're not tracking the label name
 			// Nuke everything and rebuild the timers
 			timer.Stop()
-			log.Info("Stopped timer for previous node notifier: %s", req.Name)
+			log.Info(fmt.Sprintf("Stopped timer for previous node notifier: %s", req.Name))
 			delete(timers, req.Name)
 		}
 	}
@@ -114,7 +114,7 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 			if k8serrors.IsNotFound(err) {
 				log.Info(fmt.Sprintf("Node(s) with label '%v' has been decommissioned since last check %s", nodeNotifier.Spec.Label, nodeNotifier.Name))
 			} else {
-				log.Error(err, "Error occurred when fetching nodes for node notifier %s", nodeNotifier.Name)
+				log.Error(err, fmt.Sprintf("Error occurred when fetching nodes for node notifier %s", nodeNotifier.Name))
 			}
 		} else {
 			// Notify
