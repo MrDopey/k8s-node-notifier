@@ -1,0 +1,7 @@
+apiVersion: mr.dopey/v1
+kind: nodenotifier
+metadata:
+  name: this-boy 
+spec:
+  label: abc
+  slack-url: abc
