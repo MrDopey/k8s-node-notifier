@@ -26,4 +26,6 @@ go.work.sum
 
 # ---
 
-controller
+/controller
+client.key
+client.crt
