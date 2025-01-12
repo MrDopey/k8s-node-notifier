@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,8 +43,8 @@ var (
 )
 
 const (
-	// oneHour = int64(3 * 60 * 1e9) // 5mins for debugging
-	oneHour        = int64(60 * 60 * 1e9)
+	oneHour = int64(3 * 60 * 1e9) // Xmins for debugging
+	// oneHour        = int64(60 * 60 * 1e9)
 	timerTolerance = int64(float64(oneHour) * 0.05)
 )
 
@@ -118,6 +119,12 @@ func updateNodeNotifier(ctx *context.Context, clientset *kubernetes.Clientset, n
 				node = n
 			}
 		}
+		if len(nodes.Items) == 0 {
+			timers[nodeNotifier.Name] = timerValues{timer: nil, node: nil, nn: nodeNotifier}
+			log.Info(fmt.Sprintf("No nodes found with label %s, stopping the watch", nodeNotifier.Spec.Label))
+			return nil
+		}
+
 		timeUntilNextHour := time.Duration(oneHour - (int64(maxDuration) % oneHour))
 		log.Info(fmt.Sprintf("Next tick at %f minutes, for label %s", timeUntilNextHour.Minutes(), nodeNotifier.Spec.Label))
 		timer := time.AfterFunc(timeUntilNextHour, checkThenTriggerAlert(ctx, clientset, nodeNotifier, log))
@@ -135,6 +142,7 @@ func checkThenTriggerAlert(ctx *context.Context, clientset *kubernetes.Clientset
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				log.Info(fmt.Sprintf("Node(s) with label '%v' has been decommissioned since last check %s", nodeNotifier.Spec.Label, nodeNotifier.Name))
+				timers[nodeNotifier.Name] = timerValues{timer: nil, node: nil, nn: nodeNotifier}
 			} else {
 				log.Error(err, fmt.Sprintf("Error occurred when fetching nodes for node notifier %s", nodeNotifier.Name))
 			}
@@ -148,6 +156,11 @@ func checkThenTriggerAlert(ctx *context.Context, clientset *kubernetes.Clientset
 					maxDuration = duration
 					node = n
 				}
+			}
+			if len(nodes.Items) == 0 {
+				timers[nodeNotifier.Name] = timerValues{timer: nil, node: nil, nn: nodeNotifier}
+				log.Info(fmt.Sprintf("No nodes found with label %s, stopping the watch", nodeNotifier.Spec.Label))
+				return
 			}
 			timeUntilNextHour := oneHour - (int64(maxDuration) % oneHour)
 			log.Info(fmt.Sprintf("Next tick at %f minutes, for label %s", time.Duration(timeUntilNextHour).Minutes(), nodeNotifier.Spec.Label))
@@ -170,6 +183,75 @@ func checkThenTriggerAlert(ctx *context.Context, clientset *kubernetes.Clientset
 			timer := time.AfterFunc(time.Duration(timeUntilNextHour), checkThenTriggerAlert(ctx, clientset, nodeNotifier, log))
 
 			timers[nodeNotifier.Name] = timerValues{timer: timer, node: &node, nn: nodeNotifier}
+		}
+	}
+}
+
+func watchNodes(clientset *kubernetes.Clientset, log *logr.Logger) {
+	sendInitialEvent := false
+	ctx := context.Background()
+
+	defer log.Error(fmt.Errorf("watchnodes function has exited"), "")
+
+	watcher, err := clientset.CoreV1().Nodes().Watch(ctx, v1.ListOptions{
+		AllowWatchBookmarks:  false,
+		ResourceVersionMatch: v1.ResourceVersionMatchNotOlderThan,
+		SendInitialEvents:    &sendInitialEvent,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	for event := range watcher.ResultChan() {
+		item := event.Object.(*corev1.Node)
+		log.Info(fmt.Sprintf("Node %s watch event %s", item.Name, event.Type))
+
+		switch event.Type {
+		case watch.Bookmark:
+			continue
+		case watch.Error:
+			log.Error(fmt.Errorf("watch event failed for node %s", item.Name), "Error with watching nodes")
+
+		case watch.Deleted:
+			for k, v := range timers {
+				if v.node.Name == item.Name {
+					log.Info(fmt.Sprintf("Was watching node %s for NodeNotifier %s (label %s), but it's been removed. Recalculating next timer.", item.Name, v.nn.Name, v.nn.Spec.Label))
+					if v.timer != nil {
+						v.timer.Stop()
+					}
+					// In case something goes wrong, we just keep a null copy to perserve the list of NodeNotifiers
+					timers[k] = timerValues{timer: nil, node: nil, nn: v.nn}
+					updateNodeNotifier(&ctx, clientset, v.nn, log)
+				}
+			}
+
+		case watch.Modified: // For minikube, some labels are included after the Added event
+			fallthrough
+		case watch.Added:
+			for labelKey, labelValue := range item.Labels {
+				// feature parity with k8s is hard
+				// https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors
+				// Assume the NodeNotifier is a key=value syntax instead
+				nodeLabel := fmt.Sprintf("%s=%s", labelKey, labelValue)
+
+				// Fetching CRDs from API is hard
+				// Assume the timers map contains all the nodenotifiers
+				for nnKey, nnValue := range timers {
+					if nnValue.nn.Spec.Label == nodeLabel {
+						if nnValue.node == nil {
+							log.Info(fmt.Sprintf("New node added %s, that matches the NodeNotifier %s (label %s), starting to track", item.Name, nnValue.nn.Name, nnValue.nn.Spec.Label))
+							timer := time.AfterFunc(time.Duration(oneHour), checkThenTriggerAlert(&ctx, clientset, nnValue.nn, log))
+							timers[nnKey] = timerValues{timer: timer, node: item, nn: nnValue.nn}
+
+						} else if nnValue.node.Name != item.Name {
+							log.Info(fmt.Sprintf("New node added or modified %s, that matches the NodeNotifier %s (label %s), but an older ones is already being tracked %s", item.Name, nnValue.nn.Name, nnValue.nn.Spec.Label, nnValue.node.Name))
+						}
+					}
+					// Don't break
+					// A node could potentially match multiple NodeNotifiers
+				}
+			}
+
 		}
 	}
 }
@@ -219,6 +301,8 @@ func main() {
 		setupLog.Error(err, "unable to create controller")
 		os.Exit(1)
 	}
+
+	go watchNodes(clientset, &setupLog)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

@@ -1,9 +1,17 @@
 apiVersion: mr.dopey/v1
 kind: NodeNotifier
 metadata:
-  name: boxers
+  name: primary
 spec:
-  label: minikube.k8s.io/name=minikube
+  label: minikube.k8s.io/primary=true
   # TODO: should be a secret
   # Get webhook from: https://api.slack.com/messaging/webhooks
-  slack-url: https://hooks.slack.com/services/XXXX
+  slack-url: https://hooks.slack.com/services/xxxx
+---
+apiVersion: mr.dopey/v1
+kind: NodeNotifier
+metadata:
+  name: secondary
+spec:
+  label: minikube.k8s.io/primary=false
+  slack-url: https://hooks.slack.com/services/xxxx

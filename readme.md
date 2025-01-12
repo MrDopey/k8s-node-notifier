@@ -8,6 +8,13 @@ It is an operator that looks at the node's creation time and shoots a slack mess
 
 Note: An alternative method could be to view this at a node level, and implemented as a DaemonSet, though that depends on your use case, as this version looks at a grouping of nodes. This is mostly for me to get familiar with writing a k8s operator
 
+
+# Minikube testing
+
+```shell
+minikube start --feature-gates=WatchList=true
+```
+
 # Reference
 
 - https://github.com/wardviaene/golang-demos/tree/main/kubernetes-operator
