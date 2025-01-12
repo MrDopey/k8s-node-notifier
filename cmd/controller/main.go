@@ -16,6 +16,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -28,10 +29,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
+type timerValues struct {
+	timer *time.Timer
+	node  *corev1.Node
+	nn    *nn.NodeNotifier
+}
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
-	timers   = make(map[string]*time.Timer)
+	timers   = make(map[string]timerValues)
 )
 
 const (
@@ -56,13 +63,13 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	var nodeNotifier nn.NodeNotifier
 	err := r.Client.Get(ctx, req.NamespacedName, &nodeNotifier)
-	timer, hasKey := timers[req.Name]
+	timerValue, hasKey := timers[req.Name]
 
 	deleteTimer := func() {
-		if hasKey {
+		if hasKey && timerValue.timer != nil {
 			// Since we're not tracking the label name
 			// Nuke everything and rebuild the timers
-			timer.Stop()
+			timerValue.timer.Stop()
 			log.Info(fmt.Sprintf("Stopped timer for previous node notifier: %s", req.Name))
 			delete(timers, req.Name)
 		}
@@ -78,38 +85,52 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	deleteTimer()
 
-	nodes, err := r.kubeClient.CoreV1().Nodes().List(ctx, v1.ListOptions{LabelSelector: nodeNotifier.Spec.Label})
+	err = updateNodeNotifier(&ctx, r.kubeClient, &nodeNotifier, &log)
+	if err != nil {
+		return ctrl.Result{}, err
+	} else {
+
+		return ctrl.Result{}, nil
+	}
+
+}
+
+func updateNodeNotifier(ctx *context.Context, clientset *kubernetes.Clientset, nodeNotifier *nn.NodeNotifier, log *logr.Logger) error {
+
+	nodes, err := clientset.CoreV1().Nodes().List(*ctx, v1.ListOptions{LabelSelector: nodeNotifier.Spec.Label})
 
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			log.Info(fmt.Sprintf("No nodes found with label '%v' for node notifier name '%v'", nodeNotifier.Spec.Label, req.Name))
-			return ctrl.Result{}, nil
+			timers[nodeNotifier.Name] = timerValues{timer: nil, node: nil, nn: nodeNotifier}
+			log.Info(fmt.Sprintf("No nodes found with label '%v' for node notifier name '%v'", nodeNotifier.Spec.Label, nodeNotifier.Name))
+			return nil
 		} else {
-			return ctrl.Result{}, err
+			return err
 		}
 	} else {
 		maxDuration := time.Duration(0)
+		var node corev1.Node
 		for _, n := range nodes.Items {
 			duration := time.Since(n.ObjectMeta.CreationTimestamp.Time)
 
 			if duration > maxDuration {
 				maxDuration = duration
+				node = n
 			}
 		}
 		timeUntilNextHour := time.Duration(oneHour - (int64(maxDuration) % oneHour))
 		log.Info(fmt.Sprintf("Next tick at %f minutes, for label %s", timeUntilNextHour.Minutes(), nodeNotifier.Spec.Label))
-		timer := time.AfterFunc(timeUntilNextHour, checkThenTriggerAlert(r, &ctx, nodeNotifier, &log))
+		timer := time.AfterFunc(timeUntilNextHour, checkThenTriggerAlert(ctx, clientset, nodeNotifier, log))
 
-		timers[req.Name] = timer
+		timers[nodeNotifier.Name] = timerValues{timer: timer, node: &node, nn: nodeNotifier}
+		return nil
 	}
-
-	return ctrl.Result{}, nil
 }
 
-func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.NodeNotifier, log *logr.Logger) func() {
+func checkThenTriggerAlert(ctx *context.Context, clientset *kubernetes.Clientset, nodeNotifier *nn.NodeNotifier, log *logr.Logger) func() {
 	// Check that nodes are still here and still the latest
 	return func() {
-		nodes, err := r.kubeClient.CoreV1().Nodes().List(*ctx, v1.ListOptions{LabelSelector: nodeNotifier.Spec.Label})
+		nodes, err := clientset.CoreV1().Nodes().List(*ctx, v1.ListOptions{LabelSelector: nodeNotifier.Spec.Label})
 
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
@@ -118,13 +139,14 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 				log.Error(err, fmt.Sprintf("Error occurred when fetching nodes for node notifier %s", nodeNotifier.Name))
 			}
 		} else {
-			maxDuration, nodeName := time.Duration(0), ""
+			maxDuration := time.Duration(0)
+			var node corev1.Node
 			for _, n := range nodes.Items {
 				duration := time.Since(n.ObjectMeta.CreationTimestamp.Time)
 
 				if duration > maxDuration {
 					maxDuration = duration
-					nodeName = n.Name
+					node = n
 				}
 			}
 			timeUntilNextHour := oneHour - (int64(maxDuration) % oneHour)
@@ -135,7 +157,7 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 				// or, the timer has drifted long enough to execute this function
 				log.Info(fmt.Sprintf("Node for label %s did not trigger at the hour mark for notifier %s", nodeNotifier.Spec, nodeNotifier.Name))
 			} else {
-				jsonBody := []byte(fmt.Sprintf(`{"text": "node: %s, with label %s, has been running for %f hours"}`, nodeName, nodeNotifier.Spec.Label, maxDuration.Hours()))
+				jsonBody := []byte(fmt.Sprintf(`{"text": "node: %s, with label %s, has been running for %f hours"}`, node.Name, nodeNotifier.Spec.Label, maxDuration.Hours()))
 				bodyReader := bytes.NewReader(jsonBody)
 				res, err := http.Post(nodeNotifier.Spec.SlackUrl, "application/json", bodyReader)
 				if err != nil {
@@ -145,9 +167,9 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 				}
 			}
 
-			timer := time.AfterFunc(time.Duration(timeUntilNextHour), checkThenTriggerAlert(r, ctx, nodeNotifier, log))
+			timer := time.AfterFunc(time.Duration(timeUntilNextHour), checkThenTriggerAlert(ctx, clientset, nodeNotifier, log))
 
-			timers[nodeNotifier.Name] = timer
+			timers[nodeNotifier.Name] = timerValues{timer: timer, node: &node, nn: nodeNotifier}
 		}
 	}
 }
