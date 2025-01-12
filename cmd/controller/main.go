@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -117,9 +119,6 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 				log.Error(err, fmt.Sprintf("Error occurred when fetching nodes for node notifier %s", nodeNotifier.Name))
 			}
 		} else {
-			// Notify
-			log.Info(fmt.Sprintf("triggered! %s", nodeNotifier.Name))
-
 			maxDuration := time.Duration(0)
 			for _, n := range nodes.Items {
 				duration := time.Since(n.ObjectMeta.CreationTimestamp.Time)
@@ -134,7 +133,17 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 				// Either, the node we saw last time is retired, and we're looking at another node with the same label
 				// or, the timer has drifted long enough to execute this function
 				log.Info(fmt.Sprintf("Node for label %s did not trigger at the hour mark for notifier %s", nodeNotifier.Spec, nodeNotifier.Name))
+			} else {
+				jsonBody := []byte(`{"text": "hello, server!"}`)
+				bodyReader := bytes.NewReader(jsonBody)
+				res, err := http.Post(nodeNotifier.Spec.SlackUrl, "application/json", bodyReader)
+				if err != nil {
+					log.Error(err, "error making slack reuqest")
+				} else {
+					log.Info(fmt.Sprintf("Slack request made with status code %d", res.StatusCode))
+				}
 			}
+
 			timer := time.AfterFunc(time.Duration(timeUntilNextHour), checkThenTriggerAlert(r, ctx, nodeNotifier, log))
 
 			timers[nodeNotifier.Name] = timer

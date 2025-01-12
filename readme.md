@@ -6,3 +6,4 @@ Note: This is kind of a bad idea, you should implement this as a DaemonSet, this
 Reference
 - https://github.com/wardviaene/golang-demos/tree/main/kubernetes-operator
 - https://blog.mimacom.com/k8s-watch-resources/
+- https://api.slack.com/messaging/webhooks
