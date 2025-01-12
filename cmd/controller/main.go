@@ -28,8 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-// const namespace = "custom-system"
-
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -98,8 +96,9 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				maxDuration = duration
 			}
 		}
-		timeUntilNextHour := oneHour - (int64(maxDuration) % oneHour)
-		timer := time.AfterFunc(time.Duration(timeUntilNextHour), checkThenTriggerAlert(r, &ctx, nodeNotifier, &log))
+		timeUntilNextHour := time.Duration(oneHour - (int64(maxDuration) % oneHour))
+		log.Info(fmt.Sprintf("Next tick at %f minutes, for label %s", timeUntilNextHour.Minutes(), nodeNotifier.Spec.Label))
+		timer := time.AfterFunc(timeUntilNextHour, checkThenTriggerAlert(r, &ctx, nodeNotifier, &log))
 
 		timers[req.Name] = timer
 	}
@@ -129,6 +128,7 @@ func checkThenTriggerAlert(r *reconciler, ctx *context.Context, nodeNotifier nn.
 				}
 			}
 			timeUntilNextHour := oneHour - (int64(maxDuration) % oneHour)
+			log.Info(fmt.Sprintf("Next tick at %f minutes, for label %s", time.Duration(timeUntilNextHour).Minutes(), nodeNotifier.Spec.Label))
 
 			if delta := oneHour - timeUntilNextHour; (delta < 0 && delta < -timerTolerance) || (delta > 0 && delta > timerTolerance) {
 				// Either, the node we saw last time is retired, and we're looking at another node with the same label
