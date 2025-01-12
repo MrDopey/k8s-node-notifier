@@ -4,4 +4,6 @@ metadata:
   name: boxers
 spec:
   label: minikube.k8s.io/name=minikube
-  slack-url: abc
+  # TODO: should be a secret
+  # Get webhook from: https://api.slack.com/messaging/webhooks
+  slack-url: https://hooks.slack.com/services/XXXX
